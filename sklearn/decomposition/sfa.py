@@ -1,13 +1,241 @@
+""" Slow Feature Analysis
+
+Reference: Wiskott, L. and Sejnowski, T.J., Slow Feature Analysis: Unsupervised
+           Learning of Invariances, Neural Computation, 14(4):715-770 (2002)
+"""
+
+# Author: Alberto N Escalante B <alberto.escalante@ini.rub.de>
+#         xxx  <xxx@ini.rub.de>
+# License: xxx
+
 from builtins import str
 from builtins import range
-__docformat__ = "restructuredtext en"
+#__docformat__ = "restructuredtext en"
 
-import mdp
-from mdp import numx, Node, NodeException, TrainingException
-from mdp.utils import (mult, pinv, CovarianceMatrix, QuadraticForm,
-                       symeig, SymeigException, symeig_semidefinite_reg,
-                       symeig_semidefinite_pca, symeig_semidefinite_svd,
-                       symeig_semidefinite_ldl)
+#import mdp
+#from mdp import numx, Node, NodeException, TrainingException
+#from mdp.utils import (mult, pinv, CovarianceMatrix, QuadraticForm,
+#                       symeig, SymeigException, symeig_semidefinite_reg,
+#                       symeig_semidefinite_pca, symeig_semidefinite_svd,
+#                       symeig_semidefinite_ldl)
+
+import warnings
+from sfa_symeig_semidefinite import (symeig_semidefinite_pca,
+                                     symeig_semidefinite_reg,
+                                     symeig_semidefinite_svd,
+                                     symeig_semidefinite_ldl)
+#
+from ..base import BaseEstimator, TransformerMixin
+import numpy as np
+
+import inspect
+mult = np.dot
+
+
+def wrap_eigh(A, B = None, eigenvectors = True, turbo = "on", range = None,
+              type = 1, overwrite = False):
+    """Wrapper for scipy.linalg.eigh for scipy version > 0.7"""
+    args = {}
+    args['a'] = A
+    args['b'] = B
+    args['eigvals_only'] = not eigenvectors
+    args['overwrite_a'] = overwrite
+    args['overwrite_b'] = overwrite
+    if turbo == "on":
+        args['turbo'] = True
+    else:
+        args['turbo'] = False
+    args['type'] = type
+    if range is not None:
+        n = A.shape[0]
+        lo, hi = range
+        if lo < 1:
+            lo = 1
+        if lo > n:
+            lo = n
+        if hi > n:
+            hi = n
+        if lo > hi:
+            lo, hi = hi, lo
+        # in scipy.linalg.eigh the range starts from 0
+        lo -= 1
+        hi -= 1
+        range = (lo, hi)
+    args['eigvals'] = range
+    try:
+        return np.linalg.eigh(**args)
+    except np.linalg.LinAlgError as exception:
+        raise Exception(str(exception))  # TODO: specific exception type
+
+
+def get_symeig(numx_linalg):
+    # if we have scipy, check if the version of
+    # scipy.linalg.eigh supports the rich interface
+    args = inspect.getargspec(np.linalg.eigh)[0]
+    if len(args) > 4:
+        # if yes, just wrap it
+        from .utils._symeig import wrap_eigh as symeig
+        config.ExternalDepFound('symeig', 'scipy.linalg.eigh')
+    else:
+        # either we have numpy, or we have an old scipy
+        # we need to use our own rich wrapper
+        from .utils._symeig import _symeig_fake as symeig
+        config.ExternalDepFound('symeig', 'symeig_fake')
+    return symeig
+symeig = get_symeig(np.linalg)
+
+def refcast(array, dtype):
+    """
+    Cast the array to dtype only if necessary, otherwise return a reference.
+    """
+    dtype = np.dtype(dtype)
+    if array.dtype == dtype:
+        return array
+    return array.astype(dtype)
+
+
+def svd(x, compute_uv = True):
+    """Wrap the numx SVD routine, so that it returns arrays of the correct
+    dtype and a SymeigException in case of failures."""
+    tc = x.dtype
+    try:
+        if compute_uv:
+            u, s, v = np.linalg.svd(x)
+            return refcast(u, tc), refcast(s, tc), refcast(v, tc)
+        else:
+            s = np.linalg.svd(x, compute_uv=False)
+            return refcast(s, tc)
+    except np.linalg.LinAlgError as exc:
+        raise Exception(str(exc))  # TODO: use specific object type
+
+
+def _check_roundoff(t, dtype):
+    """Check if t is so large that t+1 == t up to 2 precision digits"""
+    # limit precision
+    limit = 10.**(np.finfo(dtype).precision-2)
+    if int(t) >= limit:
+        wr = ('You have summed %e entries in the covariance matrix.'
+              '\nAs you are using dtype \'%s\', you are '
+              'probably getting severe round off'
+              '\nerrors. See CovarianceMatrix docstring for more'
+              ' information.' % (t, dtype.name))
+        warnings.warn(wr, UserWarning)  # Verify, was mdp.MDPWarning
+
+
+class CovarianceMatrix(object):
+    """This class stores an empirical covariance matrix that can be updated
+    incrementally. A call to the 'fix' method returns the current state of
+    the covariance matrix, the average and the number of observations, and
+    resets the internal data.
+
+    Note that the internal sum is a standard __add__ operation. We are not
+    using any of the fancy sum algorithms to avoid round off errors when
+    adding many numbers. If you want to contribute a CovarianceMatrix class
+    that uses such algorithms we would be happy to include it in MDP.
+    For a start see the Python recipe by Raymond Hettinger at
+    http://aspn.activestate.com/ASPN/Cookbook/Python/Recipe/393090
+    For a review about floating point arithmetic and its pitfalls see
+    http://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html
+    """
+
+    def __init__(self, dtype=None, bias=False):
+        """If dtype is not defined, it will be inherited from the first
+        data bunch received by 'update'.
+        All the matrices in this class are set up with the given dtype and
+        no upcast is possible.
+        If bias is True, the covariance matrix is normalized by dividing
+        by T instead of the usual T-1.
+        """
+        if dtype is None:
+            self._dtype = None
+        else:
+            self._dtype = np.dtype(dtype)
+        self._input_dim = None  # will be set in _init_internals
+        # covariance matrix, updated during the training phase
+        self._cov_mtx = None
+        # average, updated during the training phase
+        self._avg = None
+        # number of observation so far during the training phase
+        self._tlen = 0
+
+        self.bias = bias
+
+    def _init_internals(self, x):
+        """Init the internal structures.
+
+        The reason this is not done in the constructor is that we want to be
+        able to derive the input dimension and the dtype directly from the
+        data this class receives.
+        """
+        # init dtype
+        if self._dtype is None:
+            self._dtype = x.dtype
+        dim = x.shape[1]
+        self._input_dim = dim
+        type_ = self._dtype
+        # init covariance matrix
+        self._cov_mtx = np.zeros((dim, dim), type_)
+        # init average
+        self._avg = np.zeros(dim, type_)
+
+    def update(self, x):
+        """Update internal structures.
+
+        Note that no consistency checks are performed on the data (this is
+        typically done in the enclosing node).
+        """
+        if self._cov_mtx is None:
+            self._init_internals(x)
+        # cast input
+        x = refcast(x, self._dtype)
+        # update the covariance matrix, the average and the number of
+        # observations (try to do everything inplace)
+        self._cov_mtx += mult(x.T, x)
+        self._avg += x.sum(axis=0)
+        self._tlen += x.shape[0]
+
+    def fix(self, center=True):
+        """Returns a triple containing the covariance matrix, the average and
+        the number of observations. The covariance matrix is then reset to
+        a zero-state.
+
+        If center is false, the returned matrix is the matrix of the second moments,
+        i.e. the covariance matrix of the data without subtracting the mean."""
+        # local variables
+        type_ = self._dtype
+        tlen = self._tlen
+        _check_roundoff(tlen, type_)
+        avg = self._avg
+        cov_mtx = self._cov_mtx
+
+        ##### fix the training variables
+        # fix the covariance matrix (try to do everything inplace)
+        if self.bias:
+            cov_mtx /= tlen
+        else:
+            cov_mtx /= tlen - 1
+
+        if center:
+            avg_mtx = np.outer(avg, avg)
+            if self.bias:
+                avg_mtx /= tlen*(tlen)
+            else:
+                avg_mtx /= tlen*(tlen - 1)
+            cov_mtx -= avg_mtx
+
+        # fix the average
+        avg /= tlen
+
+        ##### clean up
+        # covariance matrix, updated during the training phase
+        self._cov_mtx = None
+        # average, updated during the training phase
+        self._avg = None
+        # number of observation so far during the training phase
+        self._tlen = 0
+
+        return cov_mtx, avg, tlen
+
 
 SINGULAR_VALUE_MSG = '''
 This usually happens if there are redundancies in the (expanded) training data.
@@ -36,7 +264,7 @@ There are several ways to deal with this issue:
     This will be more efficient in execution phase.
 '''
 
-class SFANode(Node):
+class SFANode(BaseEstimator):
     """Extract the slowly varying components from the input data.
     More information about Slow Feature Analysis can be found in
     Wiskott, L. and Sejnowski, T.J., Slow Feature Analysis: Unsupervised
@@ -323,7 +551,7 @@ class SFANode(Node):
         """
         if self.is_training():
             self.stop_training()
-        return self._refcast(t / (2 * numx.pi) * numx.sqrt(self.d))
+        return self._refcast(t / (2 * np.pi) * np.sqrt(self.d))
 
 
 class SFA2Node(SFANode):
@@ -393,7 +621,7 @@ class SFA2Node(SFANode):
         c = -mult(self.avg, sf)
         n = self.input_dim
         f = sf[:n]
-        h = numx.zeros((n, n), dtype=self.dtype)
+        h = np.zeros((n, n), dtype=self.dtype)
         k = n
         for i in range(n):
             for j in range(n):

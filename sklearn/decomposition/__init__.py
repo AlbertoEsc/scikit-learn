@@ -27,6 +27,7 @@ __all__ = ['DictionaryLearning',
            'NMF',
            'PCA',
            'RandomizedPCA',
+           'SFA'
            'SparseCoder',
            'SparsePCA',
            'dict_learning',
