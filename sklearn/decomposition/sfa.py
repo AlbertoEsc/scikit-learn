@@ -10,6 +10,7 @@ Reference: Wiskott, L. and Sejnowski, T.J., Slow Feature Analysis: Unsupervised
 
 from builtins import str
 from builtins import range
+
 #__docformat__ = "restructuredtext en"
 
 #import mdp
@@ -25,64 +26,31 @@ from sfa_symeig_semidefinite import (symeig_semidefinite_pca,
                                      symeig_semidefinite_svd,
                                      symeig_semidefinite_ldl)
 #
+from ..utils import check_array
 from ..base import BaseEstimator, TransformerMixin
+from ..utils.validation import check_is_fitted
+from ..utils import check_random_state, as_float_array
 import numpy as np
 
 import inspect
 mult = np.dot
 
-
-def wrap_eigh(A, B = None, eigenvectors = True, turbo = "on", range = None,
-              type = 1, overwrite = False):
-    """Wrapper for scipy.linalg.eigh for scipy version > 0.7"""
-    args = {}
-    args['a'] = A
-    args['b'] = B
-    args['eigvals_only'] = not eigenvectors
-    args['overwrite_a'] = overwrite
-    args['overwrite_b'] = overwrite
-    if turbo == "on":
-        args['turbo'] = True
-    else:
-        args['turbo'] = False
-    args['type'] = type
-    if range is not None:
-        n = A.shape[0]
-        lo, hi = range
-        if lo < 1:
-            lo = 1
-        if lo > n:
-            lo = n
-        if hi > n:
-            hi = n
-        if lo > hi:
-            lo, hi = hi, lo
-        # in scipy.linalg.eigh the range starts from 0
-        lo -= 1
-        hi -= 1
-        range = (lo, hi)
-    args['eigvals'] = range
-    try:
-        return np.linalg.eigh(**args)
-    except np.linalg.LinAlgError as exception:
-        raise Exception(str(exception))  # TODO: specific exception type
-
-
-def get_symeig(numx_linalg):
+def get_symeig(np_linalg):
     # if we have scipy, check if the version of
     # scipy.linalg.eigh supports the rich interface
     args = inspect.getargspec(np.linalg.eigh)[0]
     if len(args) > 4:
         # if yes, just wrap it
-        from .utils._symeig import wrap_eigh as symeig
-        config.ExternalDepFound('symeig', 'scipy.linalg.eigh')
+        from ._symeig import wrap_eigh as symeig
+        # config.ExternalDepFound('symeig', 'scipy.linalg.eigh')
     else:
         # either we have numpy, or we have an old scipy
         # we need to use our own rich wrapper
-        from .utils._symeig import _symeig_fake as symeig
-        config.ExternalDepFound('symeig', 'symeig_fake')
+        from ._symeig import _symeig_fake as symeig
+        # config.ExternalDepFound('symeig', 'symeig_fake')
     return symeig
 symeig = get_symeig(np.linalg)
+
 
 def refcast(array, dtype):
     """
@@ -95,7 +63,7 @@ def refcast(array, dtype):
 
 
 def svd(x, compute_uv = True):
-    """Wrap the numx SVD routine, so that it returns arrays of the correct
+    """Wrap the numpy SVD routine, so that it returns arrays of the correct
     dtype and a SymeigException in case of failures."""
     tc = x.dtype
     try:
@@ -264,7 +232,7 @@ There are several ways to deal with this issue:
     This will be more efficient in execution phase.
 '''
 
-class SFANode(BaseEstimator):
+class SFA(BaseEstimator):
     """Extract the slowly varying components from the input data.
     More information about Slow Feature Analysis can be found in
     Wiskott, L. and Sejnowski, T.J., Slow Feature Analysis: Unsupervised
@@ -368,14 +336,30 @@ class SFANode(BaseEstimator):
           ``train()`` calls.
     """
 
-    def __init__(self, input_dim=None, output_dim=None, dtype=None,
-                 include_last_sample=True, rank_deficit_method='none'):
+    def __init__(self, copy=True, input_dim=None, output_dim=None, dtype=None,
+                 include_last_sample=True, rank_deficit_method='none',
+                 random_state=None):
         """
         For the ``include_last_sample`` switch have a look at the
         SFANode class docstring.
         """
-        super(SFANode, self).__init__(input_dim, output_dim, dtype)
+
+        # super(SFANode, self).__init__(input_dim, output_dim, dtype)
+        # initialize basic attributes
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.dtype = dtype
+        # this var stores at which point in the training sequence we are
+        self._train_phase = 0
+        # this var is False if the training of the current phase hasn't
+        #  started yet, True otherwise
+        self._train_phase_started = False
+        # this var is False if the complete training is finished
+        self._training = True
+
+        self.copy = copy
         self._include_last_sample = include_last_sample
+        self.random_state = random_state
 
         # init two covariance matrices
         # one for the input data
@@ -424,7 +408,7 @@ class SFANode(BaseEstimator):
         return x[1:, :]-x[:-1, :]
 
     def _set_range(self):
-        if self.output_dim is not None and self.output_dim <= self.input_dim:
+        if self.output_dim is not None and (self.input_dim is None or self.output_dim <= self.input_dim):
             # (eigenvalues sorted in ascending order)
             rng = (1, self.output_dim)
         else:
@@ -456,6 +440,7 @@ class SFANode(BaseEstimator):
         self._dcov_mtx.update(self.time_derivative(x))
 
     def _stop_training(self, debug=False):
+        print "Bla bla bla"
         ##### request the covariance matrices and clean up
         if hasattr(self, '_dcov_mtx'):
             self.cov_mtx, self.avg, self.tlen = self._cov_mtx.fix()
@@ -520,8 +505,7 @@ class SFANode(BaseEstimator):
             bias = self._bias
         return mult(x, sf) - bias
 
-    def _inverse(self, y):
-        return mult(y, pinv(self.sf)) + self.avg
+
 
     def get_eta_values(self, t=1):
         """Return the eta values of the slow components learned during
@@ -553,85 +537,208 @@ class SFANode(BaseEstimator):
             self.stop_training()
         return self._refcast(t / (2 * np.pi) * np.sqrt(self.d))
 
+    # From PCA
+    def fit(self, X, y=None):
+        """Fit the model with X by extracting the slowest features.
 
-class SFA2Node(SFANode):
-    """Get an input signal, expand it in the space of
-    inhomogeneous polynomials of degree 2 and extract its slowly varying
-    components. The ``get_quadratic_form`` method returns the input-output
-    function of one of the learned unit as a ``QuadraticForm`` object.
-    See the documentation of ``mdp.utils.QuadraticForm`` for additional
-    information.
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            Training data, where n_samples in the number of samples
+            and n_features is the number of features.
 
-    More information about Slow Feature Analysis can be found in
-    Wiskott, L. and Sejnowski, T.J., Slow Feature Analysis: Unsupervised
-    Learning of Invariances, Neural Computation, 14(4):715-770 (2002)."""
+        y : Ignored
 
-    def __init__(self, input_dim=None, output_dim=None, dtype=None,
-                 include_last_sample=True, rank_deficit_method='none'):
-        self._expnode = mdp.nodes.QuadraticExpansionNode(input_dim=input_dim,
-                                                         dtype=dtype)
-        super(SFA2Node, self).__init__(input_dim, output_dim, dtype,
-                                       include_last_sample, rank_deficit_method)
-
-    @staticmethod
-    def is_invertible():
-        """Return True if the node can be inverted, False otherwise."""
-        return False
-
-    def _set_input_dim(self, n):
-        self._expnode.input_dim = n
-        self._input_dim = n
-
-    def _train(self, x, include_last_sample=None):
-        # expand in the space of polynomials of degree 2
-        super(SFA2Node, self)._train(self._expnode(x), include_last_sample)
-
-    def _set_range(self):
-        if (self.output_dim is not None) and (
-            self.output_dim <= self._expnode.output_dim):
-            # (eigenvalues sorted in ascending order)
-            rng = (1, self.output_dim)
-        else:
-            # otherwise, keep all output components
-            rng = None
-        return rng
-
-    def _stop_training(self, debug=False):
-        super(SFA2Node, self)._stop_training(debug)
-
-        # set the output dimension if necessary
-        if self.output_dim is None:
-            self.output_dim = self._expnode.output_dim
-
-    def _execute(self, x, n=None):
-        """Compute the output of the slowest functions.
-        If 'n' is an integer, then use the first 'n' slowest components."""
-        return super(SFA2Node, self)._execute(self._expnode(x), n)
-
-    def get_quadratic_form(self, nr):
+        Returns
+        -------
+        self : object
+            Returns the instance itself.
         """
-        Return the matrix H, the vector f and the constant c of the
-        quadratic form 1/2 x'Hx + f'x + c that defines the output
-        of the component 'nr' of the SFA node.
+        self._fit(check_array(X))
+        self._stop_training()
+        return self
+
+    def _fit(self, X):
+        """Fit the model to the data X.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            Training vector, where n_samples in the number of samples and
+            n_features is the number of features.
+
+        Returns
+        -------
+        X : ndarray, shape (n_samples, n_features)
+            The input data, copied, and centered when requested.
         """
-        if self.sf is None:
-            self._if_training_stop_training()
+        random_state = check_random_state(self.random_state)
+        X = np.atleast_2d(as_float_array(X, copy=self.copy))
 
-        sf = self.sf[:, nr]
-        c = -mult(self.avg, sf)
-        n = self.input_dim
-        f = sf[:n]
-        h = np.zeros((n, n), dtype=self.dtype)
-        k = n
-        for i in range(n):
-            for j in range(n):
-                if j > i:
-                    h[i, j] = sf[k]
-                    k = k+1
-                elif j == i:
-                    h[i, j] = 2*sf[k]
-                    k = k+1
-                else:
-                    h[i, j] = h[j, i]
+        # Center data
+        #self.mean_ = np.mean(X, axis=0)
+        #X -= self.mean_
 
-        return QuadraticForm(h, f, c, dtype=self.dtype)
+        self._train(X)
+
+
+        return X
+
+    def transform(self, X):
+        """Apply dimensionality reduction on X.
+
+        X is projected on the first principal components previous extracted
+        from a training set.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            New data, where n_samples in the number of samples
+            and n_features is the number of features.
+
+        Returns
+        -------
+        X_new : array-like, shape (n_samples, n_components)
+
+        """
+        # check_is_fitted(self, 'mean_')
+
+        X = check_array(X)
+        X = self._execute(X)
+        return X
+
+    def fit_transform(self, X, y=None):
+        """Fit the model with X and apply the dimensionality reduction on X.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            New data, where n_samples in the number of samples
+            and n_features is the number of features.
+
+        y : Ignored
+
+        Returns
+        -------
+        X_new : array-like, shape (n_samples, n_components)
+
+        """
+        X = check_array(X)
+        X = self._fit(X)
+        return np.dot(X, self.components_.T)
+
+    def inverse_transform(self, X):
+        """Transform data back to its original space.
+
+        Returns an array X_original whose transform would be X.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_components)
+            New data, where n_samples in the number of samples
+            and n_components is the number of components.
+
+        Returns
+        -------
+        X_original array-like, shape (n_samples, n_features)
+
+        Notes
+        -----
+        None yet.
+        """
+        #check_is_fitted(self, 'mean_')
+
+        X_original = mult(y, pinv(self.sf)) + self.avg
+        return X_original
+
+if __name__ == "__main__":
+    print "adsadfs dfsdfs dsf ds"
+    sfa = SFA(input_dim=None, output_dim=3, dtype=None,
+              include_last_sample=True, rank_deficit_method='none')
+    X = np.random.normal(size=(20,5))
+    sfa.fit(X)
+    y = sfa.transform(X)
+    print y
+
+# Consider the following conde after SFANode has been ported to scikits
+# class SFA2Node(SFANode):
+#     """Get an input signal, expand it in the space of
+#     inhomogeneous polynomials of degree 2 and extract its slowly varying
+#     components. The ``get_quadratic_form`` method returns the input-output
+#     function of one of the learned unit as a ``QuadraticForm`` object.
+#     See the documentation of ``mdp.utils.QuadraticForm`` for additional
+#     information.
+#
+#     More information about Slow Feature Analysis can be found in
+#     Wiskott, L. and Sejnowski, T.J., Slow Feature Analysis: Unsupervised
+#     Learning of Invariances, Neural Computation, 14(4):715-770 (2002)."""
+#
+#     def __init__(self, input_dim=None, output_dim=None, dtype=None,
+#                  include_last_sample=True, rank_deficit_method='none'):
+#         self._expnode = mdp.nodes.QuadraticExpansionNode(input_dim=input_dim,
+#                                                          dtype=dtype)
+#         super(SFA2Node, self).__init__(input_dim, output_dim, dtype,
+#                                        include_last_sample, rank_deficit_method)
+#
+#     @staticmethod
+#     def is_invertible():
+#         """Return True if the node can be inverted, False otherwise."""
+#         return False
+#
+#     def _set_input_dim(self, n):
+#         self._expnode.input_dim = n
+#         self._input_dim = n
+#
+#     def _train(self, x, include_last_sample=None):
+#         # expand in the space of polynomials of degree 2
+#         super(SFA2Node, self)._train(self._expnode(x), include_last_sample)
+#
+#     def _set_range(self):
+#         if (self.output_dim is not None) and (
+#             self.output_dim <= self._expnode.output_dim):
+#             # (eigenvalues sorted in ascending order)
+#             rng = (1, self.output_dim)
+#         else:
+#             # otherwise, keep all output components
+#             rng = None
+#         return rng
+#
+#     def _stop_training(self, debug=False):
+#         super(SFA2Node, self)._stop_training(debug)
+#
+#         # set the output dimension if necessary
+#         if self.output_dim is None:
+#             self.output_dim = self._expnode.output_dim
+#
+#     def _execute(self, x, n=None):
+#         """Compute the output of the slowest functions.
+#         If 'n' is an integer, then use the first 'n' slowest components."""
+#         return super(SFA2Node, self)._execute(self._expnode(x), n)
+#
+#     def get_quadratic_form(self, nr):
+#         """
+#         Return the matrix H, the vector f and the constant c of the
+#         quadratic form 1/2 x'Hx + f'x + c that defines the output
+#         of the component 'nr' of the SFA node.
+#         """
+#         if self.sf is None:
+#             self._if_training_stop_training()
+#
+#         sf = self.sf[:, nr]
+#         c = -mult(self.avg, sf)
+#         n = self.input_dim
+#         f = sf[:n]
+#         h = np.zeros((n, n), dtype=self.dtype)
+#         k = n
+#         for i in range(n):
+#             for j in range(n):
+#                 if j > i:
+#                     h[i, j] = sf[k]
+#                     k = k+1
+#                 elif j == i:
+#                     h[i, j] = 2*sf[k]
+#                     k = k+1
+#                 else:
+#                     h[i, j] = h[j, i]
+#
+#         return QuadraticForm(h, f, c, dtype=self.dtype)
