@@ -6,26 +6,21 @@ Reference: Wiskott, L. and Sejnowski, T.J., Slow Feature Analysis: Unsupervised
 
 # Author: Alberto N Escalante B <alberto.escalante@ini.rub.de>
 #         xxx  <xxx@ini.rub.de>
+#         xxx  <xxx@ini.rub.de>
+#         xxx  <xxx@ini.rub.de>
+#         xxx  <xxx@ini.rub.de>
+# This algorithm has been adapted Modular toolkit for Data Processing (MDP),
+# see: http://mdp-toolkit.sourceforge.net/
 # License: xxx
 
 from builtins import str
 from builtins import range
-
-#__docformat__ = "restructuredtext en"
-
-#import mdp
-#from mdp import numx, Node, NodeException, TrainingException
-#from mdp.utils import (mult, pinv, CovarianceMatrix, QuadraticForm,
-#                       symeig, SymeigException, symeig_semidefinite_reg,
-#                       symeig_semidefinite_pca, symeig_semidefinite_svd,
-#                       symeig_semidefinite_ldl)
 
 import warnings
 from sfa_symeig_semidefinite import (symeig_semidefinite_pca,
                                      symeig_semidefinite_reg,
                                      symeig_semidefinite_svd,
                                      symeig_semidefinite_ldl)
-#
 from ..utils import check_array
 from ..base import BaseEstimator, TransformerMixin
 from ..utils.validation import check_is_fitted
@@ -33,12 +28,12 @@ from ..utils import check_random_state, as_float_array
 import numpy as np
 
 import inspect
-mult = np.dot
 
-def get_symeig(np_linalg):
+
+def get_symeig(linalg):
     # if we have scipy, check if the version of
     # scipy.linalg.eigh supports the rich interface
-    args = inspect.getargspec(np.linalg.eigh)[0]
+    args = inspect.getargspec(linalg.eigh)[0]
     if len(args) > 4:
         # if yes, just wrap it
         from ._symeig import wrap_eigh as symeig
@@ -98,14 +93,8 @@ class CovarianceMatrix(object):
 
     Note that the internal sum is a standard __add__ operation. We are not
     using any of the fancy sum algorithms to avoid round off errors when
-    adding many numbers. If you want to contribute a CovarianceMatrix class
-    that uses such algorithms we would be happy to include it in MDP.
-    For a start see the Python recipe by Raymond Hettinger at
-    http://aspn.activestate.com/ASPN/Cookbook/Python/Recipe/393090
-    For a review about floating point arithmetic and its pitfalls see
-    http://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html
+    adding many numbers.
     """
-
     def __init__(self, dtype=None, bias=False):
         """If dtype is not defined, it will be inherited from the first
         data bunch received by 'update'.
@@ -158,7 +147,7 @@ class CovarianceMatrix(object):
         x = refcast(x, self._dtype)
         # update the covariance matrix, the average and the number of
         # observations (try to do everything inplace)
-        self._cov_mtx += mult(x.T, x)
+        self._cov_mtx += np.dot(x.T, x)
         self._avg += x.sum(axis=0)
         self._tlen += x.shape[0]
 
@@ -492,7 +481,7 @@ class SFA(BaseEstimator):
             del self.dcov_mtx
 
         # store bias
-        self._bias = mult(self.avg, self.sf)
+        self._bias = np.dot(self.avg, self.sf)
 
     def _execute(self, x, n=None):
         """Compute the output of the slowest functions.
@@ -503,7 +492,7 @@ class SFA(BaseEstimator):
         else:
             sf = self.sf
             bias = self._bias
-        return mult(x, sf) - bias
+        return np.dot(x, sf) - bias
 
 
 
@@ -648,7 +637,7 @@ class SFA(BaseEstimator):
         """
         #check_is_fitted(self, 'mean_')
 
-        X_original = mult(y, pinv(self.sf)) + self.avg
+        X_original = np.dot(y, pinv(self.sf)) + self.avg
         return X_original
 
 if __name__ == "__main__":
@@ -658,7 +647,30 @@ if __name__ == "__main__":
     X = np.random.normal(size=(20,5))
     sfa.fit(X)
     y = sfa.transform(X)
-    print y
+    print(y)
+    print(sfa.d)
+    print(sfa.sf[0:3, 0:3])
+    print(sfa.avg)
+    print(sfa._bias)
+    try:
+        import mdp
+        sfa_node = mdp.nodes.SFANode(output_dim=3,
+                                     include_last_sample=True,
+                                     rank_deficit_method='none')
+        sfa_node.train(X)
+        sfa_node.stop_training()
+        y_mdp = sfa_node.execute(X)
+
+        # Adjustment of the global feature sign
+        y_n = y * np.sign(y[0, :])
+        y_mpd_n = y_mdp * np.sign(y_mdp[0, :])
+        print(y_mpd_n)
+        print(sfa_node.d)
+        print(sfa_node.sf[0:3, 0:3])
+        print(sfa.avg)
+        print(sfa_node._bias)
+    except ImportError as ex:
+        print('Could not import mdp:', ex)
 
 # Consider the following conde after SFANode has been ported to scikits
 # class SFA2Node(SFANode):
@@ -725,7 +737,7 @@ if __name__ == "__main__":
 #             self._if_training_stop_training()
 #
 #         sf = self.sf[:, nr]
-#         c = -mult(self.avg, sf)
+#         c = -np.dot(self.avg, sf)
 #         n = self.input_dim
 #         f = sf[:n]
 #         h = np.zeros((n, n), dtype=self.dtype)
