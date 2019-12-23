@@ -17,7 +17,7 @@ from builtins import str
 from builtins import range
 
 import warnings
-from sfa_symeig_semidefinite import (symeig_semidefinite_pca,
+from .sfa_symeig_semidefinite import (symeig_semidefinite_pca,
                                      symeig_semidefinite_reg,
                                      symeig_semidefinite_svd,
                                      symeig_semidefinite_ldl)
@@ -429,7 +429,6 @@ class SFA(BaseEstimator):
         self._dcov_mtx.update(self.time_derivative(x))
 
     def _stop_training(self, debug=False):
-        print "Bla bla bla"
         ##### request the covariance matrices and clean up
         if hasattr(self, '_dcov_mtx'):
             self.cov_mtx, self.avg, self.tlen = self._cov_mtx.fix()
@@ -641,10 +640,9 @@ class SFA(BaseEstimator):
         return X_original
 
 if __name__ == "__main__":
-    print "adsadfs dfsdfs dsf ds"
     sfa = SFA(input_dim=None, output_dim=3, dtype=None,
               include_last_sample=True, rank_deficit_method='none')
-    X = np.random.normal(size=(20,5))
+    X = np.random.normal(size=(20, 5))
     sfa.fit(X)
     y = sfa.transform(X)
     print(y)
